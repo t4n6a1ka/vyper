@@ -492,14 +492,13 @@ class Stmt(object):
         if self._is_list_iter():
             return self.parse_for_list()
 
-        is_invalid_for_statement = any((
-            not isinstance(self.stmt.iter, ast.Call),
-            not isinstance(self.stmt.iter.func, ast.Name),
-            not isinstance(self.stmt.target, ast.Name),
-            self.stmt.iter.func.id != "range",
-            len(self.stmt.iter.args) not in {1, 2},
-        ))
-        if is_invalid_for_statement:
+        from .validation import (
+            is_for_in_range_stmt,
+            is_range_with_one_integer_value,
+            is_range_with_two_integer_values,
+        )
+
+        if not is_for_in_range_stmt(self.stmt):
             raise StructureException((
                 "For statements must be of the form `for i in range(rounds): "
                 "..` or `for i in range(start, start + rounds): ..`"
@@ -509,16 +508,15 @@ class Stmt(object):
         with self.context.make_blockscope(block_scope_id):
             # Get arg0
             arg0 = self.stmt.iter.args[0]
-            num_of_args = len(self.stmt.iter.args)
 
             # Type 1 for, e.g. for i in range(10): ...
-            if num_of_args == 1:
+            if is_range_with_one_integer_value(self.stmt, self.context):
                 arg0_val = self._get_range_const_value(arg0)
                 start = LLLnode.from_list(0, typ='int128', pos=getpos(self.stmt))
                 rounds = arg0_val
 
             # Type 2 for, e.g. for i in range(100, 110): ...
-            elif self._check_valid_range_constant(self.stmt.iter.args[1], raise_exception=False)[0]:
+            elif is_range_with_two_integer_values(self.stmt, self.context):
                 arg0_val = self._get_range_const_value(arg0)
                 arg1_val = self._get_range_const_value(self.stmt.iter.args[1])
                 start = LLLnode.from_list(arg0_val, typ='int128', pos=getpos(self.stmt))
