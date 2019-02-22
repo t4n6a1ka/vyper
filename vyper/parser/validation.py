@@ -97,7 +97,7 @@ def is_ast_binop_add(value):
 
 def _is_expr_basetype(value, context):
     expr = Expr.parse_value_expr(value, context)
-    return isinstance(expr.type, BaseType)
+    return isinstance(expr.typ, BaseType)
 
 
 def is_expr_basetype(context):
@@ -106,7 +106,7 @@ def is_expr_basetype(context):
 
 def _is_expr_literal(value, context):
     expr = Expr.parse_value_expr(value, context)
-    return expr.is_literal
+    return expr.typ.is_literal
 
 
 def is_expr_literal(context):
@@ -115,15 +115,15 @@ def is_expr_literal(context):
 
 def _is_expr_of_type(value, context, _type):
     expr = Expr.parse_value_expr(value, context)
-    return expr.type == _type
+    return expr.typ.typ == _type
 
 
 def check_expr_type_is_uint256(context):
     return functools.partial(_is_expr_of_type, context=context, _type='uint256')
 
 
-def check_expr_type_is_int256(context):
-    return functools.partial(_is_expr_of_type, context=context, _type='uint256')
+def check_expr_type_is_int128(context):
+    return functools.partial(_is_expr_of_type, context=context, _type='int128')
 
 
 def check_length_equal(length):
@@ -140,39 +140,68 @@ is_for_in_range_stmt = check_all(
 )
 
 
-def is_expr_literal_integer(value, context):
+def compliment(fn):
+    @functools.wraps(fn)
+    def inner(*args, **kwargs):
+        return not fn(*args, **kwargs)
+    return inner
+
+
+def _is_expr_literal_integer(value, context):
     return check_all(
         is_expr_basetype(context),
         is_expr_literal(context),
         check_any(
-            check_expr_type_is_uint256,
-            check_expr_type_is_int256,
+            check_expr_type_is_uint256(context),
+            check_expr_type_is_int128(context),
         ),
-    )
+    )(value)
 
 
-def is_expr_non_literal_integer(value, context):
+def is_expr_literal_integer(context):
+    return functools.partial(_is_expr_literal_integer, context=context)
+
+
+def _is_expr_non_literal_integer(value, context):
     return check_all(
         is_expr_basetype(context),
-        is_expr_literal(context),
+        compliment(is_expr_literal(context)),
         check_any(
-            check_expr_type_is_uint256,
-            check_expr_type_is_int256,
+            check_expr_type_is_uint256(context),
+            check_expr_type_is_int128(context),
         ),
-    )
+    )(value)
 
 
-def is_expr_any_integer(value, context):
+def is_expr_non_literal_integer(context):
+    return functools.partial(_is_expr_non_literal_integer, context=context)
+
+
+def _is_expr_any_integer(value, context):
     return check_all(
         is_expr_basetype(context),
         check_any(
-            check_expr_type_is_uint256,
-            check_expr_type_is_int256,
+            check_expr_type_is_uint256(context),
+            check_expr_type_is_int128(context),
         ),
-    )
+    )(value)
 
 
-def _check_value_at_index(items, index, check_fn):
+def is_expr_any_integer(context):
+    return functools.partial(_is_expr_any_integer, context=context)
+
+
+def _is_expr_eval_to_integer(value, context):
+    return check_all(
+        is_ast_binop,
+    )(value)
+
+
+def is_expr_eval_to_integer(context):
+    return functools.partial(_is_expr_eval_to_integer, context=context)
+
+
+def _check_at_index(items, index, check_fn):
     try:
         value = items[index]
     except IndexError:
@@ -181,23 +210,50 @@ def _check_value_at_index(items, index, check_fn):
         return check_fn(value)
 
 
-def check_value_at_index(index, check_fn):
-    return functools.partial(_check_value_at_index, index=index, check_fn=check_fn)
+def check_at_index(index, check_fn):
+    return functools.partial(_check_at_index, index=index, check_fn=check_fn)
 
 
-def is_range_with_one_integer_value(value, context):
-    return check_all(
-        check_nested_attr(('iter', 'args'), check_length_equal(1)),
-        check_nested_attr(('iter', 'args'), check_value_at_index(1, functools.partial(is_expr_any_integer, context=context))),
-    )
+def is_range_with_one_literal_value(value, context):
+    return check_nested_attr(
+        ('iter', 'args'),
+        check_all(
+            check_length_equal(1),
+            check_at_index(0, is_expr_literal_integer(context)),
+        ),
+    )(value)
 
 
-def is_range_with_two_integer_values(value, context):
-    return check_all(
-        check_nested_attr(('iter', 'args'), check_length_equal(2)),
-        check_nested_attr(('iter', 'args'), check_value_at_index(1, functools.partial(is_expr_any_integer, context=context))),
-        check_nested_attr(('iter', 'args'), check_value_at_index(2, functools.partial(is_expr_any_integer, context=context))),
-    )
+def is_range_with_one_non_literal_value(value, context):
+    return check_nested_attr(
+        ('iter', 'args'),
+        check_all(
+            check_length_equal(1),
+            check_at_index(0, is_expr_non_literal_integer(context)),
+        ),
+    )(value)
+
+
+def is_range_with_two_literal_values(value, context):
+    return check_nested_attr(
+        ('iter', 'args'),
+        check_all(
+            check_length_equal(2),
+            check_at_index(0, is_expr_literal_integer(context)),
+            check_at_index(1, is_expr_literal_integer(context)),
+        ),
+    )(value)
+
+
+def is_range_with_value_and_expression(value, context):
+    return check_nested_attr(
+        ('iter', 'args'),
+        check_all(
+            check_length_equal(2),
+            check_at_index(0, is_expr_non_literal_integer(context)),
+            check_at_index(1, is_expr_literal_integer(context)),
+        ),
+    )(value)
 
 
 def is_for_with_constant():

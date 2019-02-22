@@ -494,8 +494,13 @@ class Stmt(object):
 
         from .validation import (
             is_for_in_range_stmt,
-            is_range_with_one_integer_value,
-            is_range_with_two_integer_values,
+            check_nested_attr,
+            check_length_equal,
+            apply_transform,
+            check_equals,
+            is_range_with_one_literal_value,
+            is_range_with_one_non_literal_value,
+            is_range_with_two_literal_values,
         )
 
         if not is_for_in_range_stmt(self.stmt):
@@ -508,15 +513,18 @@ class Stmt(object):
         with self.context.make_blockscope(block_scope_id):
             # Get arg0
             arg0 = self.stmt.iter.args[0]
+            num_args = len(self.stmt.iter.args[0])
 
             # Type 1 for, e.g. for i in range(10): ...
-            if is_range_with_one_integer_value(self.stmt, self.context):
+            if is_range_with_one_literal_value(self.stmt, self.context):
                 arg0_val = self._get_range_const_value(arg0)
                 start = LLLnode.from_list(0, typ='int128', pos=getpos(self.stmt))
                 rounds = arg0_val
-
+            elif is_range_with_one_non_literal_value(self.stmt, self.context):
+                start = LLLnode.from_list(0, typ='int128', pos=getpos(self.stmt))
+                rounds = Expr.parse_value_expr(self.stmt.iter.args[0])
             # Type 2 for, e.g. for i in range(100, 110): ...
-            elif is_range_with_two_integer_values(self.stmt, self.context):
+            elif is_range_with_two_literal_values(self.stmt, self.context):
                 arg0_val = self._get_range_const_value(arg0)
                 arg1_val = self._get_range_const_value(self.stmt.iter.args[1])
                 start = LLLnode.from_list(arg0_val, typ='int128', pos=getpos(self.stmt))
@@ -524,6 +532,7 @@ class Stmt(object):
 
             # Type 3 for, e.g. for i in range(x, x + 10): ...
             else:
+                assert False
                 arg1 = self.stmt.iter.args[1]
                 if not isinstance(arg1, ast.BinOp) or not isinstance(arg1.op, ast.Add):
                     raise StructureException(
