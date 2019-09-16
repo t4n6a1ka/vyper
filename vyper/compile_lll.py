@@ -65,9 +65,9 @@ class instruction(str):
     def __init__(self, sstr, pos=None):
         self.pc_debugger = False
         if pos is not None:
-            self.lineno, self.col_offset = pos
+            self.lineno, self.col_offset, self.end_lineno, self.end_col_offset = pos
         else:
-            self.lineno, self.col_offset = None, None
+            self.lineno, self.col_offset, self.end_lineno, self.end_col_offset = [None] * 4
 
 
 def apply_line_numbers(func):
@@ -452,8 +452,12 @@ def compile_to_assembly(code, withargs=None, existing_labels=None, break_dest=No
 
 def note_line_num(line_number_map, item, pos):
     # Record line number attached to pos.
-    if isinstance(item, instruction) and item.lineno is not None:
-        line_number_map['pc_pos_map'][pos] = item.lineno, item.col_offset
+    if isinstance(item, instruction):
+        if item.lineno is not None:
+            offsets = (item.lineno, item.col_offset, item.end_lineno, item.end_col_offset)
+        else:
+            offsets = None
+        line_number_map['pc_pos_map'][pos] = offsets
     added_line_breakpoint = note_breakpoint(line_number_map, item, pos)
     return added_line_breakpoint
 
@@ -470,36 +474,54 @@ def note_breakpoint(line_number_map, item, pos):
 
 
 # Assembles assembly into EVM
-def assembly_to_evm(assembly, map_line_numbers=True):
-    line_number_map = {'breakpoints': set(), 'pc_breakpoints': set(), 'pc_pos_map': {}}
+def assembly_to_evm(assembly, start_pos=0):
+    line_number_map = {
+        'breakpoints': set(),
+        'pc_breakpoints': set(),
+        'pc_jump_map': {0: '-'},
+        'pc_pos_map': {},
+    }
     posmap = {}
     sub_assemblies = []
     codes = []
-    pos = 0
+    pos = start_pos
     for i, item in enumerate(assembly):
         note_line_num(line_number_map, item, pos)
         if item == 'DEBUG':
             continue  # skip debug
+
+        if item == "JUMP":
+            last = assembly[i - 1]
+            if last == "MLOAD":
+                line_number_map['pc_jump_map'][pos] = "o"
+            elif is_symbol(last) and "_priv_" in last:
+                line_number_map['pc_jump_map'][pos] = "i"
+            else:
+                line_number_map['pc_jump_map'][pos] = "-"
+        elif item in ("JUMPI", "JUMPDEST"):
+            line_number_map['pc_jump_map'][pos] = "-"
+
         if is_symbol(item):
             if assembly[i + 1] == 'JUMPDEST' or assembly[i + 1] == 'BLANK':
                 # Don't increment position as the symbol itself doesn't go into code
-                posmap[item] = pos
+                posmap[item] = pos - start_pos
             else:
                 pos += 3  # PUSH2 highbits lowbits
         elif item == 'BLANK':
             pos += 0
         elif isinstance(item, list):
-            c, line_number_map = assembly_to_evm(item)
+            c, sub_map = assembly_to_evm(item, start_pos=pos)
             sub_assemblies.append(item)
             codes.append(c)
             pos += len(c)
+            for key in line_number_map:
+                line_number_map[key].update(sub_map[key])
         else:
             pos += 1
 
     posmap['_sym_codeend'] = pos
     o = b''
     for i, item in enumerate(assembly):
-        note_line_num(line_number_map, item, pos)
         if item == 'DEBUG':
             continue  # skip debug
         elif is_symbol(item):
@@ -526,7 +548,7 @@ def assembly_to_evm(assembly, map_line_numbers=True):
             # Should never reach because, assembly is create in compile_to_assembly.
             raise Exception("Weird symbol in assembly: " + str(item))  # pragma: no cover
 
-    assert len(o) == pos
+    assert len(o) == pos - start_pos
     line_number_map['breakpoints'] = list(line_number_map['breakpoints'])
     line_number_map['pc_breakpoints'] = list(line_number_map['pc_breakpoints'])
     return o, line_number_map

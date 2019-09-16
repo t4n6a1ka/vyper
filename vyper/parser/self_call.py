@@ -2,6 +2,8 @@ import itertools
 
 from vyper.exceptions import (
     ConstancyViolationException,
+    StructureException,
+    TypeMismatchException,
 )
 from vyper.parser.lll_node import (
     LLLnode,
@@ -26,9 +28,27 @@ from vyper.types import (
 
 def call_lookup_specs(stmt_expr, context):
     from vyper.parser.expr import Expr
+
     method_name = stmt_expr.func.attr
-    expr_args = [Expr(arg, context).lll_node for arg in stmt_expr.args]
-    sig = FunctionSignature.lookup_sig(context.sigs, method_name, expr_args, stmt_expr, context)
+
+    if len(stmt_expr.keywords):
+        raise TypeMismatchException(
+            "Cannot use keyword arguments in calls to functions via 'self'",
+            stmt_expr,
+        )
+    expr_args = [
+        Expr(arg, context).lll_node
+        for arg in stmt_expr.args
+    ]
+
+    sig = FunctionSignature.lookup_sig(
+        context.sigs,
+        method_name,
+        expr_args,
+        stmt_expr,
+        context,
+    )
+
     return method_name, expr_args, sig
 
 
@@ -44,10 +64,10 @@ def make_call(stmt_expr, context):
             getpos(stmt_expr)
         )
 
-    if sig.private:
-        return call_self_private(stmt_expr, context, sig)
-    else:
-        return call_self_public(stmt_expr, context, sig)
+    if not sig.private:
+        raise StructureException("Cannot call public functions via 'self'", stmt_expr)
+
+    return call_self_private(stmt_expr, context, sig)
 
 
 def call_make_placeholder(stmt_expr, context, sig):
@@ -122,15 +142,15 @@ def call_self_private(stmt_expr, context, sig):
             sig,
             expr_args,
             context,
+            stmt_expr,
             return_placeholder=False,
-            pos=getpos(stmt_expr),
         )
         push_args += [inargs]  # copy arguments first, to not mess up the push/pop sequencing.
 
         static_arg_size = 32 * sum(
                 [get_static_size_of_type(arg.typ)
                     for arg in expr_args])
-        static_pos = arg_pos + static_arg_size
+        static_pos = int(arg_pos + static_arg_size)
         needs_dyn_section = any(
                 [has_dynamic_data(arg.typ)
                     for arg in expr_args])
@@ -149,9 +169,11 @@ def call_self_private(stmt_expr, context, sig):
             # by taking ceil32(len<arg>) + offset<arg> + arg_pos
             # for the last dynamic argument and arg_pos is the start
             # the whole argument section.
-            for idx, arg in enumerate(expr_args):
+            idx = 0
+            for arg in expr_args:
                 if isinstance(arg.typ, ByteArrayLike):
                     last_idx = idx
+                idx += get_static_size_of_type(arg.typ)
             push_args += [
                 ['with', 'offset', ['mload', arg_pos + last_idx * 32],
                     ['with', 'len_pos', ['add', arg_pos, 'offset'],
@@ -176,6 +198,11 @@ def call_self_private(stmt_expr, context, sig):
         push_args += [
             ['mload', pos] for pos in reversed(range(arg_pos, static_pos, 32))
         ]
+    elif sig.args:
+        raise StructureException(
+            f"Wrong number of args for: {sig.name} (0 args given, expected {len(sig.args)})",
+            stmt_expr
+        )
 
     # Jump to function label.
     jump_to_func = [
@@ -269,30 +296,6 @@ def call_self_private(stmt_expr, context, sig):
         pos=getpos(stmt_expr),
         annotation='Internal Call: %s' % method_name,
         add_gas_estimate=sig.gas
-    )
-    o.gas += sig.gas
-    return o
-
-
-def call_self_public(stmt_expr, context, sig):
-    # self.* style call to a public function.
-    method_name, expr_args, sig = call_lookup_specs(stmt_expr, context)
-    add_gas = sig.gas  # gas of call
-    inargs, inargsize, _ = pack_arguments(sig, expr_args, context, pos=getpos(stmt_expr))
-    output_placeholder, returner, output_size = call_make_placeholder(stmt_expr, context, sig)
-    assert_call = [
-        'assert',
-        ['call', ['gas'], ['address'], 0, inargs, inargsize, output_placeholder, output_size],
-    ]
-    if output_size > 0:
-        assert_call = ['seq', assert_call, returner]
-    o = LLLnode.from_list(
-        assert_call,
-        typ=sig.output_type,
-        location='memory',
-        pos=getpos(stmt_expr),
-        add_gas_estimate=add_gas,
-        annotation='Internal Call: %s' % method_name,
     )
     o.gas += sig.gas
     return o

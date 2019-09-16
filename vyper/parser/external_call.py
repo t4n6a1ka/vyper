@@ -1,5 +1,6 @@
 from vyper import ast
 from vyper.exceptions import (
+    ConstancyViolationException,
     FunctionDeclarationException,
     StructureException,
     TypeMismatchException,
@@ -16,6 +17,7 @@ from vyper.parser.parser_utils import (
 from vyper.types import (
     BaseType,
     ByteArrayLike,
+    ListType,
     TupleLike,
     get_size_of_type,
 )
@@ -45,6 +47,10 @@ def external_contract_call(node,
             f'Contract "{contract_name}" not declared yet',
             node
         )
+    if contract_address.value == "address":
+        raise StructureException(
+            f"External calls to self are not permitted.", node
+        )
     method_name = node.func.attr
     if method_name not in context.sigs[contract_name]:
         raise FunctionDeclarationException(
@@ -60,7 +66,7 @@ def external_contract_call(node,
         sig,
         [Expr(arg, context).lll_node for arg in node.args],
         context,
-        pos=pos,
+        node.func,
     )
     output_placeholder, output_size, returner = get_external_contract_call_output(sig, context)
     sub = [
@@ -68,6 +74,16 @@ def external_contract_call(node,
         ['assert', ['extcodesize', contract_address]],
         ['assert', ['ne', 'address', contract_address]],
     ]
+    if context.is_constant() and not sig.const:
+        raise ConstancyViolationException(
+            "May not call non-constant function '%s' within %s." % (
+                method_name,
+                context.pp_constancy(),
+            ) +
+            " For asserting the result of modifiable contract calls, try assert_modifiable.",
+            node
+        )
+
     if context.is_constant() or sig.const:
         sub.append([
             'assert',
@@ -99,6 +115,8 @@ def get_external_contract_call_output(sig, context):
     elif isinstance(sig.output_type, ByteArrayLike):
         returner = [0, output_placeholder + 32]
     elif isinstance(sig.output_type, TupleLike):
+        returner = [0, output_placeholder]
+    elif isinstance(sig.output_type, ListType):
         returner = [0, output_placeholder]
     else:
         raise TypeMismatchException("Invalid output type: %s" % sig.output_type)

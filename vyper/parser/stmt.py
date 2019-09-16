@@ -37,6 +37,7 @@ from vyper.parser.parser_utils import (
     make_return_stmt,
     make_setter,
     unwrap_location,
+    zero_pad,
 )
 from vyper.types import (
     BaseType,
@@ -355,6 +356,8 @@ class Stmt(object):
         none = ast.NameConstant(value=None)
         none.lineno = self.stmt.lineno
         none.col_offset = self.stmt.col_offset
+        none.end_lineno = self.stmt.end_lineno
+        none.end_col_offset = self.stmt.end_col_offset
         zero = Expr(none, self.context).lll_node
 
         # Get target variable
@@ -729,6 +732,8 @@ class Stmt(object):
                     op=self.stmt.op,
                     lineno=self.stmt.lineno,
                     col_offset=self.stmt.col_offset,
+                    end_lineno=self.stmt.end_lineno,
+                    end_col_offset=self.stmt.end_col_offset,
                 ),
                 self.context,
             )
@@ -747,6 +752,8 @@ class Stmt(object):
                     op=self.stmt.op,
                     lineno=self.stmt.lineno,
                     col_offset=self.stmt.col_offset,
+                    end_lineno=self.stmt.end_lineno,
+                    end_col_offset=self.stmt.end_col_offset,
                 ),
                 self.context,
             )
@@ -776,27 +783,6 @@ class Stmt(object):
             )
         if not self.stmt.value:
             raise TypeMismatchException("Expecting to return a value", self.stmt)
-
-        def zero_pad(bytez_placeholder, maxlen):
-            zero_padder = LLLnode.from_list(['pass'])
-            if maxlen > 0:
-                # Iterator used to zero pad memory.
-                zero_pad_i = self.context.new_placeholder(BaseType('uint256'))
-                zero_padder = LLLnode.from_list([
-                    'with', '_ceil32_end', ['ceil32', ['mload', bytez_placeholder]], [
-                        'repeat', zero_pad_i, ['mload', bytez_placeholder], maxlen, [
-                            'seq',
-                            # stay within allocated bounds
-                            ['if', ['gt', ['mload', zero_pad_i], '_ceil32_end'], 'break'],
-                            [
-                                'mstore8',
-                                ['add', ['add', 32, bytez_placeholder], ['mload', zero_pad_i]],
-                                0
-                            ],
-                        ],
-                    ],
-                ], annotation="Zero pad")
-            return zero_padder
 
         sub = Expr(self.stmt.value, self.context).lll_node
 
@@ -882,7 +868,7 @@ class Stmt(object):
                         sub,
                         pos=getpos(self.stmt)
                     ),
-                    zero_pad(bytez_placeholder, sub.typ.maxlen),
+                    zero_pad(bytez_placeholder, sub.typ.maxlen, self.context),
                     ['mstore', len_placeholder, 32],
                     make_return_stmt(
                         self.stmt,
@@ -1020,11 +1006,13 @@ class Stmt(object):
                 "Cannot modify storage inside %s: %s" % (
                     self.context.pp_constancy(),
                     target.annotation,
-                )
+                ),
+                self.stmt,
             )
         if not target.mutable:
             raise ConstancyViolationException(
-                "Cannot modify function argument: %s" % target.annotation
+                "Cannot modify function argument: %s" % target.annotation,
+                self.stmt,
             )
         return target
 

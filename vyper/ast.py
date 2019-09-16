@@ -6,8 +6,23 @@ import typing
 from vyper.exceptions import (
     CompilerPanic,
 )
+from vyper.settings import (
+    VYPER_ERROR_CONTEXT_LINES,
+    VYPER_ERROR_LINE_NUMBERS,
+)
+from vyper.utils import (
+    annotate_source_code,
+)
 
-BASE_NODE_ATTRIBUTES = ('node_id', 'source_code', 'col_offset', 'lineno')
+BASE_NODE_ATTRIBUTES = (
+    'node_id',
+    'source_code',
+    'col_offset',
+    'lineno',
+    'end_col_offset',
+    'end_lineno',
+    'src'
+)
 
 
 class VyperNode:
@@ -34,14 +49,26 @@ class VyperNode:
                 )
 
     def __eq__(self, other):
-        if isinstance(other, type(self)):
-            for field_name in self.get_slots():
-                if field_name not in ('node_id', 'source_code', 'col_offset', 'lineno'):
-                    if getattr(self, field_name, None) != getattr(other, field_name, None):
-                        return False
-            return True
-        else:
+        if not isinstance(other, type(self)):
             return False
+        for field_name in (i for i in self.get_slots() if i not in BASE_NODE_ATTRIBUTES):
+            if getattr(self, field_name, None) != getattr(other, field_name, None):
+                return False
+        return True
+
+    def __repr__(self):
+        cls = type(self)
+        class_repr = f'{cls.__module__}.{cls.__qualname__}'
+
+        source_annotation = annotate_source_code(
+            self.source_code,
+            self.lineno,
+            self.col_offset,
+            context_lines=VYPER_ERROR_CONTEXT_LINES,
+            line_numbers=VYPER_ERROR_LINE_NUMBERS,
+        )
+
+        return f'{class_repr}:\n{source_annotation}'
 
 
 class Module(VyperNode):
@@ -274,4 +301,4 @@ class alias(VyperNode):
 
 
 class ImportFrom(VyperNode):
-    __slots__ = ('module', 'names')
+    __slots__ = ('level', 'module', 'names')

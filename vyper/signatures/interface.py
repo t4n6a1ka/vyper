@@ -1,7 +1,13 @@
 import copy
 import importlib
-import os
+from pathlib import (
+    Path,
+)
 import pkgutil
+from typing import (
+    Sequence,
+    Tuple,
+)
 
 from vyper import ast
 from vyper.exceptions import (
@@ -118,8 +124,9 @@ def mk_full_signature_from_json(abi):
 
 def extract_sigs(sig_code):
     if sig_code['type'] == 'vyper':
+        interface_ast = parser.parse_to_ast(sig_code['code'])
         return sig_utils.mk_full_signature(
-            parser.parse_to_ast(sig_code['code']),
+            [i for i in interface_ast if not isinstance(i, (ast.Import, ast.ImportFrom))],
             sig_formatter=lambda x, y: x
         )
     elif sig_code['type'] == 'json':
@@ -180,7 +187,7 @@ def extract_external_interface(code, contract_name, interface_codes=None):
         interface_codes=interface_codes,
     )
     functions = [sig for sig, _ in sigs if isinstance(sig, FunctionSignature)]
-    cname = os.path.basename(contract_name).split('.')[0].capitalize()
+    cname = Path(contract_name).stem.capitalize()
 
     out = ""
     offset = 4 * " "
@@ -212,15 +219,81 @@ def extract_file_interface_imports(code: SourceCode) -> InterfaceImports:
                     )
                 if a_name.asname in imports_dict:
                     raise StructureException(
-                        'Interface with alias {} already exists'.format(a_name.asname),
+                        f'Interface with alias {a_name.asname} already exists',
                         item,
                     )
-                imports_dict[a_name.asname] = a_name.name
+                imports_dict[a_name.asname] = a_name.name.replace('.', '/')
+        elif isinstance(item, ast.ImportFrom):
+            for a_name in item.names:  # type: ignore
+                if a_name.asname:
+                    raise StructureException("From imports cannot use aliases", item)
+            level = item.level  # type: ignore
+            module = item.module or ""  # type: ignore
+            if not level and module == 'vyper.interfaces':
+                continue
+            if level:
+                base_path = f"{'.'*level}/{module.replace('.','/')}"
+            else:
+                base_path = module.replace('.', '/')
+            for a_name in item.names:  # type: ignore
+                if a_name.name in imports_dict:
+                    raise StructureException(
+                        f'Interface with name {a_name.name} already exists',
+                        item,
+                    )
+                imports_dict[a_name.name] = f"{base_path}/{a_name.name}"
 
     return imports_dict
 
 
+Conflict = Tuple[FunctionSignature, FunctionSignature]
+Conflicts = Tuple[Conflict, ...]
+
+
+def find_signature_conflicts(sigs: Sequence[FunctionSignature]) -> Conflicts:
+    """
+    Takes a sequence of function signature records and returns a tuple of
+    pairs of signatures from that sequence that produce the same internal
+    method id.
+    """
+    # Consider self-comparisons as having been seen by default (they will be
+    # skipped)
+    comparisons_seen = set([frozenset((sig.sig,)) for sig in sigs])
+    conflicts = []
+
+    for sig in sigs:
+        method_id = sig.method_id
+
+        for other_sig in sigs:
+            comparison_id = frozenset((sig.sig, other_sig.sig))
+            if comparison_id in comparisons_seen:
+                continue  # Don't make redundant or useless comparisons
+
+            other_method_id = other_sig.method_id
+            if method_id == other_method_id:
+                conflicts.append((sig, other_sig))
+
+            comparisons_seen.add(comparison_id)
+
+    return tuple(conflicts)
+
+
 def check_valid_contract_interface(global_ctx, contract_sigs):
+    public_func_sigs = [
+        sig for sig in contract_sigs.values()
+        if isinstance(sig, FunctionSignature) and not sig.private
+    ]
+    func_conflicts = find_signature_conflicts(public_func_sigs)
+
+    if len(func_conflicts) > 0:
+        sig_1, sig_2 = func_conflicts[0]
+
+        raise StructureException(
+            f'Methods {sig_1.sig} and {sig_2.sig} have conflicting IDs '
+            f'(id {sig_1.method_id})',
+            sig_1.func_ast_code,
+        )
+
     if global_ctx._interface:
         funcs_left = global_ctx._interface.copy()
 

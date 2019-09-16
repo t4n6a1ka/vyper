@@ -2,7 +2,10 @@ from collections import (
     Counter,
 )
 
-from vyper import ast
+from vyper import (
+    ast,
+    parser,
+)
 from vyper.ast_utils import (
     to_python_ast,
 )
@@ -157,7 +160,7 @@ class FunctionSignature:
                         custom_structs=None,
                         contract_def=False,
                         constants=None,
-                        constant=False):
+                        constant_override=False):
         if not custom_structs:
             custom_structs = {}
 
@@ -170,9 +173,7 @@ class FunctionSignature:
 
         # Validate default values.
         for default_value in getattr(code.args, 'defaults', []):
-            allowed_types = (ast.Num, ast.Str, ast.Bytes, ast.List, ast.NameConstant)
-            if not isinstance(default_value, allowed_types):
-                raise FunctionDeclarationException("Default parameter values have to be literals.")
+            validate_default_values(default_value)
 
         # Determine the arguments, expects something of the form def foo(arg1:
         # int128, arg2: int128 ...
@@ -219,8 +220,13 @@ class FunctionSignature:
             else:
                 mem_pos += get_size_of_type(parsed_type) * 32
 
-        # Apply decorators
-        const, payable, private, public, nonreentrant_key = False, False, False, False, ''
+        const = constant_override
+        payable = False
+        private = False
+        public = False
+        nonreentrant_key = ''
+
+        # Update function properties from decorators
         for dec in code.decorator_list:
             if isinstance(dec, ast.Name) and dec.id == "constant":
                 const = True
@@ -231,6 +237,11 @@ class FunctionSignature:
             elif isinstance(dec, ast.Name) and dec.id == "public":
                 public = True
             elif isinstance(dec, ast.Call) and dec.func.id == "nonreentrant":
+                if nonreentrant_key:
+                    raise StructureException(
+                        "Only one @nonreentrant decorator allowed per function",
+                        dec
+                    )
                 if dec.args and len(dec.args) == 1 and isinstance(dec.args[0], ast.Str) and dec.args[0].s:  # noqa: E501
                     nonreentrant_key = dec.args[0].s
                 else:
@@ -258,10 +269,9 @@ class FunctionSignature:
                 "Function visibility must be declared (@public or @private)",
                 code,
             )
-        if constant and nonreentrant_key:
+        if const and nonreentrant_key:
             raise StructureException("@nonreentrant makes no sense on a @constant function.", code)
-        if constant:
-            const = True
+
         # Determine the return type and whether or not it's constant. Expects something
         # of the form:
         # def foo(): ...
@@ -458,3 +468,19 @@ class FunctionSignature:
         # Run balanced return statement check.
         UnmatchedReturnChecker().visit(to_python_ast(self.func_ast_code))
         EnsureSingleExitChecker().visit(to_python_ast(self.func_ast_code))
+
+
+def validate_default_values(node):
+    if isinstance(node, ast.Name) and node.id in parser.expr.BUILTIN_CONSTANTS:
+        return
+    if isinstance(node, ast.Attribute) and node.value.id in parser.expr.ENVIRONMENT_VARIABLES:
+        return
+    allowed_types = (ast.Num, ast.Str, ast.Bytes, ast.List, ast.NameConstant)
+    if not isinstance(node, allowed_types):
+        raise FunctionDeclarationException(
+            "Default value must be a literal, built-in constant, or environment variable.",
+            node
+        )
+    if isinstance(node, ast.List):
+        for n in node.elts:
+            validate_default_values(n)

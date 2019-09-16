@@ -239,7 +239,12 @@ def get_length(arg):
 
 
 def getpos(node):
-    return (node.lineno, node.col_offset)
+    return (
+        node.lineno,
+        node.col_offset,
+        getattr(node, 'end_lineno', None),
+        getattr(node, 'end_col_offset', None)
+    )
 
 
 # Take a value representing a memory or storage location, and descend down to
@@ -434,7 +439,8 @@ def unwrap_location(orig):
 
 
 # Pack function arguments for a call
-def pack_arguments(signature, args, context, pos, return_placeholder=True):
+def pack_arguments(signature, args, context, stmt_expr, return_placeholder=True):
+    pos = getpos(stmt_expr)
     placeholder_typ = ByteArrayType(
         maxlen=sum([get_size_of_type(arg.typ) for arg in signature.args]) * 32 + 32
     )
@@ -446,11 +452,9 @@ def pack_arguments(signature, args, context, pos, return_placeholder=True):
     actual_arg_count = len(args)
     if actual_arg_count != expected_arg_count:
         raise StructureException(
-            "Wrong number of args for: %s (%s args, expected %s)" % (
-                signature.name,
-                actual_arg_count,
-                expected_arg_count,
-            )
+            f"Wrong number of args for: {signature.name} "
+            f"({actual_arg_count} args given, expected {expected_arg_count}",
+            stmt_expr
         )
 
     for i, (arg, typ) in enumerate(zip(args, [arg.typ for arg in signature.args])):
@@ -483,7 +487,7 @@ def pack_arguments(signature, args, context, pos, return_placeholder=True):
 
         elif isinstance(typ, (StructType, ListType)):
             if has_dynamic_data(typ):
-                raise TypeMismatchException("Cannot pack bytearray in struct")
+                raise TypeMismatchException("Cannot pack bytearray in struct", stmt_expr)
             target = LLLnode.from_list(
                 [placeholder + 32 + staticarray_offset + i * 32],
                 typ=typ,
@@ -497,7 +501,7 @@ def pack_arguments(signature, args, context, pos, return_placeholder=True):
             staticarray_offset += 32 * (count - 1)
 
         else:
-            raise TypeMismatchException("Cannot pack argument of type %r" % typ)
+            raise TypeMismatchException(f"Cannot pack argument of type {typ}", stmt_expr)
 
     # For private call usage, doesn't use a returner.
     returner = [[placeholder + 28]] if return_placeholder else []
@@ -531,6 +535,14 @@ def make_setter(left, right, location, pos, in_function_call=False):
             pos,
             in_function_call=in_function_call,
         )
+        # TODO this overlaps a type check in parser.stmt.Stmt._check_valid_assign
+        # and should be examined during a refactor (@iamdefinitelyahuman)
+        if 'int' in left.typ.typ and isinstance(right.value, int):
+            if not SizeLimits.in_bounds(left.typ.typ, right.value):
+                raise InvalidLiteralException(
+                    f"Number out of range for {left.typ}: {right.value}",
+                    pos
+                )
         if location == 'storage':
             return LLLnode.from_list(['sstore', left, right], typ=None)
         elif location == 'memory':
@@ -887,16 +899,17 @@ def annotate_ast(
     RewriteUnarySubVisitor().visit(parsed_ast)
 
 
-def zero_pad(bytez_placeholder, maxlen, context):
+def zero_pad(bytez_placeholder, maxlen, context=None, zero_pad_i=None):
     zero_padder = LLLnode.from_list(['pass'])
     if maxlen > 0:
         # Iterator used to zero pad memory.
-        zero_pad_i = context.new_placeholder(BaseType('uint256'))
+        if zero_pad_i is None:
+            zero_pad_i = context.new_placeholder(BaseType('uint256'))
         zero_padder = LLLnode.from_list([
-            'repeat', zero_pad_i, ['mload', bytez_placeholder], maxlen, [
+            'repeat', zero_pad_i, ['mload', bytez_placeholder], ceil32(maxlen), [
                 'seq',
                 # stay within allocated bounds
-                ['if', ['gt', ['mload', zero_pad_i], maxlen], 'break'],
+                ['if', ['gt', ['mload', zero_pad_i], ceil32(maxlen)], 'break'],
                 ['mstore8', ['add', ['add', 32, bytez_placeholder], ['mload', zero_pad_i]], 0]
             ]],
             annotation="Zero pad",
@@ -906,6 +919,10 @@ def zero_pad(bytez_placeholder, maxlen, context):
 
 # Generate return code for stmt
 def make_return_stmt(stmt, context, begin_pos, _size, loop_memory_position=None):
+    from vyper.parser.function_definitions.utils import (
+        get_nonreentrant_lock
+    )
+    _, nonreentrant_post = get_nonreentrant_lock(context.sig, context.global_ctx)
     if context.is_private:
         if loop_memory_position is None:
             loop_memory_position = context.new_placeholder(typ=BaseType('uint256'))
@@ -922,7 +939,8 @@ def make_return_stmt(stmt, context, begin_pos, _size, loop_memory_position=None)
             mloads = [
                 ['mload', pos] for pos in range(begin_pos, _size, 32)
             ]
-            return ['seq_unchecked'] + mloads + [['jump', ['mload', context.callback_ptr]]]
+            return ['seq_unchecked'] + mloads + nonreentrant_post + \
+                [['jump', ['mload', context.callback_ptr]]]
         else:
             mloads = [
                 'seq_unchecked',
@@ -945,9 +963,10 @@ def make_return_stmt(stmt, context, begin_pos, _size, loop_memory_position=None)
                 ['goto', start_label],
                 ['label', exit_label]
             ]
-            return ['seq_unchecked'] + [mloads] + [['jump', ['mload', context.callback_ptr]]]
+            return ['seq_unchecked'] + [mloads] + nonreentrant_post + \
+                [['jump', ['mload', context.callback_ptr]]]
     else:
-        return ['return', begin_pos, _size]
+        return ['seq_unchecked'] + nonreentrant_post + [['return', begin_pos, _size]]
 
 
 # Generate code for returning a tuple or struct.
@@ -955,7 +974,7 @@ def gen_tuple_return(stmt, context, sub):
     # Is from a call expression.
     if sub.args and len(sub.args[0].args) > 0 and sub.args[0].args[0].value == 'call':
         # self-call to public.
-        mem_pos = sub.args[0].args[-1]
+        mem_pos = sub
         mem_size = get_size_of_type(sub.typ) * 32
         return LLLnode.from_list(['return', mem_pos, mem_size], typ=sub.typ)
 

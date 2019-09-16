@@ -16,6 +16,7 @@ from vyper.parser.parser_utils import (
     make_byte_array_copier,
     make_setter,
     unwrap_location,
+    zero_pad,
 )
 from vyper.types.types import (
     BaseType,
@@ -58,6 +59,11 @@ def pack_logging_topics(event_id, args, expected_topics, context, pos):
                     size = ['sload', ['sha3_32', value]]
                 topics.append(byte_array_to_num(value, arg, 'uint256', size))
         else:
+            if arg_type != expected_type:
+                raise TypeMismatchException(
+                    f"Invalid type for logging topic, got {arg_type} expected {expected_type}",
+                    value.pos
+                )
             value = unwrap_location(value)
             value = base_type_conversion(value, arg_type, expected_type, pos=code_pos)
             topics.append(value)
@@ -103,24 +109,9 @@ def pack_args_by_32(holder, maxlen, arg, typ, context, placeholder,
         copier = make_byte_array_copier(dest_placeholder, source_lll, pos=pos)
         holder.append(copier)
         # Add zero padding.
-        new_maxlen = ceil32(source_lll.typ.maxlen)
-
-        holder.append([
-            'with', '_ceil32_end', ['ceil32', ['mload', dest_placeholder]], [
-                'seq', ['with', '_bytearray_loc', dest_placeholder, [
-                    'seq', ['repeat', zero_pad_i, ['mload', '_bytearray_loc'], new_maxlen, [
-                        'seq',
-                        # stay within allocated bounds
-                        ['if', ['ge', ['mload', zero_pad_i], '_ceil32_end'], 'break'],
-                        [
-                            'mstore8',
-                            ['add', ['add', '_bytearray_loc', 32], ['mload', zero_pad_i]],
-                            0,
-                        ],
-                    ]],
-                ]],
-            ]
-        ])
+        holder.append(
+            zero_pad(dest_placeholder, maxlen, zero_pad_i=zero_pad_i)
+        )
 
         # Increment offset counter.
         increment_counter = LLLnode.from_list([
